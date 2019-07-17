@@ -1,7 +1,7 @@
 /*
  * local.c - Setup a socks5 proxy through remote shadowsocks server
  *
- * Copyright (C) 2013 - 2018, Max Lv <max.c.lv@gmail.com>
+ * Copyright (C) 2013 - 2019, Max Lv <max.c.lv@gmail.com>
  *
  * This file is part of the shadowsocks-libev.
  *
@@ -80,10 +80,6 @@
 #define EWOULDBLOCK EAGAIN
 #endif
 
-#ifndef BUF_SIZE
-#define BUF_SIZE 2048
-#endif
-
 int verbose    = 0;
 int reuse_port = 0;
 
@@ -94,7 +90,7 @@ uint64_t rx    = 0;
 ev_tstamp last = 0;
 
 int is_remote_dns = 1; // resolve hostname remotely
-char *stat_path = NULL;
+char *stat_path   = NULL;
 protect_socket_fn protect_socket_callback = NULL;
 #endif
 
@@ -103,7 +99,7 @@ static crypto_t *crypto;
 static int acl       = 0;
 static int mode      = TCP_ONLY;
 static int ipv6first = 0;
-       int fast_open = 0;
+int fast_open        = 0;
 static int no_delay  = 0;
 static int udp_fd    = 0;
 static int ret_val   = 0;
@@ -304,7 +300,7 @@ server_handshake_reply(EV_P_ ev_io *w, int udp_assc, struct socks5_response *res
 
     buffer_t resp_to_send;
     buffer_t *resp_buf = &resp_to_send;
-    balloc(resp_buf, BUF_SIZE);
+    balloc(resp_buf, SOCKET_BUF_SIZE);
 
     memcpy(resp_buf->data, response, sizeof(struct socks5_response));
     memcpy(resp_buf->data + sizeof(struct socks5_response),
@@ -359,7 +355,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         }
         return server_handshake_reply(EV_A_ w, 1, &response);
     } else if (request->cmd != SOCKS5_CMD_CONNECT) {
-        LOGE("unsupported cmd: %d", request->cmd);
+        LOGE("unsupported command: %d", request->cmd);
         response.rep = SOCKS5_REP_CMD_NOT_SUPPORTED;
         char *send_buf = (char *)&response;
         send(server->fd, send_buf, 4, 0);
@@ -368,7 +364,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         return -1;
     }
 
-    char host[MAX_HOSTNAME_LEN+1], ip[INET6_ADDRSTRLEN], port[16];
+    char host[MAX_HOSTNAME_LEN + 1], ip[INET6_ADDRSTRLEN], port[16];
 
     buffer_t *abuf = server->abuf;
     abuf->idx = 0;
@@ -387,7 +383,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         abuf->len += in_addr_len + 2;
 
         if (acl || verbose) {
-            uint16_t p = ntohs(*(uint16_t *)(buf->data + request_len + in_addr_len));
+            uint16_t p = load16_be(buf->data + request_len + in_addr_len);
             if (!inet_ntop(AF_INET, (const void *)(buf->data + request_len),
                            ip, INET_ADDRSTRLEN)) {
                 LOGI("inet_ntop(AF_INET): %s", strerror(errno));
@@ -405,8 +401,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         abuf->len += name_len + 2;
 
         if (acl || verbose) {
-            uint16_t p =
-                ntohs(*(uint16_t *)(buf->data + request_len + 1 + name_len));
+            uint16_t p = load16_be(buf->data + request_len + 1 + name_len);
             memcpy(host, buf->data + request_len + 1, name_len);
             host[name_len] = '\0';
             sprintf(port, "%d", p);
@@ -420,7 +415,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         abuf->len += in6_addr_len + 2;
 
         if (acl || verbose) {
-            uint16_t p = ntohs(*(uint16_t *)(buf->data + request_len + in6_addr_len));
+            uint16_t p = load16_be(buf->data + request_len + in6_addr_len);
             if (!inet_ntop(AF_INET6, (const void *)(buf->data + request_len),
                            ip, INET6_ADDRSTRLEN)) {
                 LOGI("inet_ntop(AF_INET6): %s", strerror(errno));
@@ -443,16 +438,16 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
     int hostname_len = 0;
 
     char *hostname;
-    uint16_t dst_port = ntohs(*(uint16_t *)(abuf->data + abuf->len - 2));
+    uint16_t dst_port = load16_be(abuf->data + abuf->len - 2);
 
     if (atyp == SOCKS5_ATYP_IPV4 || atyp == SOCKS5_ATYP_IPV6) {
         if (dst_port == http_protocol->default_port)
             hostname_len = http_protocol->parse_packet(buf->data + 3 + abuf->len,
-                                              buf->len - 3 - abuf->len, &hostname);
+                                                       buf->len - 3 - abuf->len, &hostname);
         else if (dst_port == tls_protocol->default_port)
             hostname_len = tls_protocol->parse_packet(buf->data + 3 + abuf->len,
-                                             buf->len - 3 - abuf->len, &hostname);
-        if (hostname_len == -1 && buf->len < BUF_SIZE && server->stage != STAGE_SNI) {
+                                                      buf->len - 3 - abuf->len, &hostname);
+        if (hostname_len == -1 && buf->len < SOCKET_BUF_SIZE && server->stage != STAGE_SNI) {
             if (server_handshake_reply(EV_A_ w, 0, &response) < 0)
                 return -1;
             server->stage = STAGE_SNI;
@@ -536,7 +531,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
             }
 
             int ip_match = (resolved || atyp == SOCKS5_ATYP_IPV4
-                    || atyp == SOCKS5_ATYP_IPV6) ? acl_match_host(ip) : 0;
+                            || atyp == SOCKS5_ATYP_IPV6) ? acl_match_host(ip) : 0;
 
             switch (get_acl_mode()) {
             case BLACK_LIST:
@@ -604,7 +599,7 @@ not_bypass:
     }
 
     if (!remote->direct) {
-        int err = crypto->encrypt(abuf, server->e_ctx, BUF_SIZE);
+        int err = crypto->encrypt(abuf, server->e_ctx, SOCKET_BUF_SIZE);
         if (err) {
             LOGE("invalid password or cipher");
             close_and_free_remote(EV_A_ remote);
@@ -648,7 +643,7 @@ server_stream(EV_P_ ev_io *w, buffer_t *buf)
 #ifdef __ANDROID__
         tx += remote->buf->len;
 #endif
-        int err = crypto->encrypt(remote->buf, server->e_ctx, BUF_SIZE);
+        int err = crypto->encrypt(remote->buf, server->e_ctx, SOCKET_BUF_SIZE);
 
         if (err) {
             LOGE("invalid password or cipher");
@@ -658,7 +653,7 @@ server_stream(EV_P_ ev_io *w, buffer_t *buf)
         }
 
         if (server->abuf) {
-            bprepend(remote->buf, server->abuf, BUF_SIZE);
+            bprepend(remote->buf, server->abuf, SOCKET_BUF_SIZE);
             bfree(server->abuf);
             ss_free(server->abuf);
             server->abuf = NULL;
@@ -858,7 +853,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
     }
 
     if (revents != EV_TIMER) {
-        r = recv(server->fd, buf->data + buf->len, BUF_SIZE - buf->len, 0);
+        r = recv(server->fd, buf->data + buf->len, SOCKET_BUF_SIZE - buf->len, 0);
 
         if (r == 0) {
             // connection closed
@@ -889,6 +884,13 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             // all processed
             return;
         } else if (server->stage == STAGE_INIT) {
+            if (verbose) {
+                struct sockaddr_in peer_addr;
+                socklen_t peer_addr_len = sizeof peer_addr;
+                if (getpeername(server->fd, (struct sockaddr *)&peer_addr, &peer_addr_len) == 0) {
+                    LOGI("connection from %s:%hu", inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
+                }
+            }
             if (buf->len < 1)
                 return;
             if (buf->data[0] != SVERSION) {
@@ -1015,7 +1017,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     remote_t *remote              = remote_recv_ctx->remote;
     server_t *server              = remote->server;
 
-    ssize_t r = recv(remote->fd, server->buf->data, BUF_SIZE, 0);
+    ssize_t r = recv(remote->fd, server->buf->data, SOCKET_BUF_SIZE, 0);
 
     if (r == 0) {
         // connection closed
@@ -1042,7 +1044,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
         rx += server->buf->len;
         stat_update_cb();
 #endif
-        int err = crypto->decrypt(server->buf, server->d_ctx, BUF_SIZE);
+        int err = crypto->decrypt(server->buf, server->d_ctx, SOCKET_BUF_SIZE);
         if (err == CRYPTO_ERROR) {
             LOGE("invalid password or cipher");
             close_and_free_remote(EV_A_ remote);
@@ -1188,7 +1190,7 @@ new_remote(int fd, int timeout)
     remote->buf      = ss_malloc(sizeof(buffer_t));
     remote->recv_ctx = ss_malloc(sizeof(remote_ctx_t));
     remote->send_ctx = ss_malloc(sizeof(remote_ctx_t));
-    balloc(remote->buf, BUF_SIZE);
+    balloc(remote->buf, SOCKET_BUF_SIZE);
     memset(remote->recv_ctx, 0, sizeof(remote_ctx_t));
     memset(remote->send_ctx, 0, sizeof(remote_ctx_t));
     remote->recv_ctx->connected = 0;
@@ -1244,8 +1246,8 @@ new_server(int fd)
     server->send_ctx = ss_malloc(sizeof(server_ctx_t));
     server->buf      = ss_malloc(sizeof(buffer_t));
     server->abuf     = ss_malloc(sizeof(buffer_t));
-    balloc(server->buf, BUF_SIZE);
-    balloc(server->abuf, BUF_SIZE);
+    balloc(server->buf, SOCKET_BUF_SIZE);
+    balloc(server->abuf, SOCKET_BUF_SIZE);
     memset(server->recv_ctx, 0, sizeof(server_ctx_t));
     memset(server->send_ctx, 0, sizeof(server_ctx_t));
     server->stage               = STAGE_INIT;
@@ -1372,6 +1374,11 @@ create_remote(listen_ctx_t *listener,
     memcpy(&(remote->addr), remote_addr, remote->addr_len);
     remote->direct = direct;
 
+    if (verbose) {
+        struct sockaddr_in *sockaddr = (struct sockaddr_in *)&remote->addr;
+        LOGI("remote: %s:%hu", inet_ntoa(sockaddr->sin_addr), ntohs(sockaddr->sin_port));
+    }
+
     return remote;
 }
 
@@ -1474,11 +1481,12 @@ main(int argc, char **argv)
     char *plugin_port = NULL;
     char tmp_port[8];
 
-    srand(time(NULL));
-
     int remote_num = 0;
     ss_addr_t remote_addr[MAX_REMOTE_NUM];
     char *remote_port = NULL;
+
+    memset(remote_addr, 0, sizeof(ss_addr_t) * MAX_REMOTE_NUM);
+    srand(time(NULL));
 
     static struct option long_options[] = {
         { "reuse-port",  no_argument,       NULL, GETOPT_VAL_REUSE_PORT  },
@@ -1492,7 +1500,7 @@ main(int argc, char **argv)
         { "password",    required_argument, NULL, GETOPT_VAL_PASSWORD    },
         { "key",         required_argument, NULL, GETOPT_VAL_KEY         },
         { "help",        no_argument,       NULL, GETOPT_VAL_HELP        },
-        { NULL,                          0, NULL,                      0 }
+        { NULL,          0,                 NULL, 0                      }
     };
 
     opterr = 0;
@@ -1697,12 +1705,22 @@ main(int argc, char **argv)
         }
     }
 
-    if (remote_num == 0 || remote_port == NULL ||
+    if (remote_num == 0) {
+        fprintf(stderr, "remote_num is 0\n");
+        exit(EXIT_FAILURE);
+    }
+    if (!remote_port) {
+        fprintf(stderr, "remote_port is NULL\n");
+        exit(EXIT_FAILURE);
+    }
 #ifndef HAVE_LAUNCHD
-        local_port == NULL ||
+    if (!local_port) {
+        fprintf(stderr, "local_port is NULL\n");
+        exit(EXIT_FAILURE);
+    }
 #endif
-        (password == NULL && key == NULL)) {
-        usage();
+    if (!password && !key) {
+        fprintf(stderr, "both password and key are NULL\n");
         exit(EXIT_FAILURE);
     }
 
@@ -1716,7 +1734,11 @@ main(int argc, char **argv)
             FATAL("failed to find a free port");
         }
         snprintf(tmp_port, 8, "%d", port);
-        plugin_host = "127.0.0.1";
+        if (is_ipv6only(remote_addr, remote_num, ipv6first)) {
+            plugin_host = "::1";
+        } else {
+            plugin_host = "127.0.0.1";
+        }
         plugin_port = tmp_port;
 
 #ifdef __MINGW32__
@@ -1752,7 +1774,11 @@ main(int argc, char **argv)
 #endif
 
     if (local_addr == NULL) {
-        local_addr = "127.0.0.1";
+        if (is_ipv6only(remote_addr, remote_num, ipv6first)) {
+            local_addr = "::1";
+        } else {
+            local_addr = "127.0.0.1";
+        }
     }
 
     USE_SYSLOG(argv[0], pid_flags);

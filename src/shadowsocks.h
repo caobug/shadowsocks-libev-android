@@ -79,6 +79,13 @@ typedef void (*ss_local_callback)(int socks_fd, int udp_fd, void *data);
  */
 int start_ss_local_server(profile_t profile);
 
+/**
+ * Security stop the local server and free all resource.
+ *
+ * @return 0
+ */
+int stop_ss_local_server(void);
+
 /*
  * Create and start a shadowsocks local server, specifying a callback.
  *
@@ -88,6 +95,17 @@ int start_ss_local_server(profile_t profile);
  * Returns -1 on failure.
  */
 int start_ss_local_server_with_callback(profile_t profile, ss_local_callback callback, void *udata);
+
+
+#ifdef __ANDROID__
+
+typedef int (*protect_socket_fn)(int fd);
+
+extern protect_socket_fn protect_socket_callback;
+
+void set_ss_protect_socket_fn(protect_socket_fn callback);
+
+#endif
 
 #ifdef __cplusplus
 }

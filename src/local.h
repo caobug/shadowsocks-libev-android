@@ -43,6 +43,8 @@
 
 typedef struct listen_ctx {
     ev_io io;
+    struct ev_loop *loop;
+    ev_async stop_watcher;
     char *iface;
     int remote_num;
     int timeout;

@@ -48,6 +48,7 @@
 
 #include <libcork/core.h>
 
+#include "shadowsocks.h"
 #include "utils.h"
 #include "netutils.h"
 #include "cache.h"
@@ -1177,7 +1178,13 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 
 #ifdef __ANDROID__
         if (vpn) {
-            if (protect_socket(remotefd) == -1) {
+            if (protect_socket_callback != NULL) {
+                if (protect_socket_callback(remotefd) != 0) {
+                    ERROR("protect_socket");
+                    close(remotefd);
+                    goto CLEAN_UP;
+                }
+            } else if (protect_socket(remotefd) == -1) {
                 ERROR("protect_socket");
                 close(remotefd);
                 goto CLEAN_UP;

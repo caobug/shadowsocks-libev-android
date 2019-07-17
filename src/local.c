@@ -33,6 +33,7 @@
 #include <strings.h>
 #include <unistd.h>
 #include <getopt.h>
+#include "ppbloom.h"
 #ifndef __MINGW32__
 #include <errno.h>
 #include <arpa/inet.h>
@@ -94,6 +95,7 @@ ev_tstamp last = 0;
 
 int is_remote_dns = 1; // resolve hostname remotely
 char *stat_path = NULL;
+protect_socket_fn protect_socket_callback = NULL;
 #endif
 
 static crypto_t *crypto;
@@ -665,7 +667,7 @@ server_stream(EV_P_ ev_io *w, buffer_t *buf)
 
     if (!remote->send_ctx->connected) {
 #ifdef __ANDROID__
-        if (vpn) {
+        if (vpn || protect_socket_callback != NULL) {
             int not_protect = 0;
             if (remote->addr.ss_family == AF_INET) {
                 struct sockaddr_in *s = (struct sockaddr_in *)&remote->addr;
@@ -673,7 +675,14 @@ server_stream(EV_P_ ev_io *w, buffer_t *buf)
                     not_protect = 1;
             }
             if (!not_protect) {
-                if (protect_socket(remote->fd) == -1) {
+                if (protect_socket_callback != NULL) {
+                    if (protect_socket_callback(remote->fd) != 0) {
+                        ERROR("protect_socket");
+                        close_and_free_remote(EV_A_ remote);
+                        close_and_free_server(EV_A_ server);
+                        return;
+                    }
+                } else if (protect_socket(remote->fd) == -1) {
                     ERROR("protect_socket");
                     close_and_free_remote(EV_A_ remote);
                     close_and_free_server(EV_A_ server);
@@ -1977,6 +1986,25 @@ main(int argc, char **argv)
 
 #else
 
+listen_ctx_t listen_ctx;
+
+void
+stop_async_cb(EV_P_ ev_async *w, int revents)
+{
+    ev_async_stop(EV_A_ &listen_ctx.stop_watcher);
+    ev_signal_stop(EV_DEFAULT, &sigint_watcher);
+    ev_signal_stop(EV_DEFAULT, &sigterm_watcher);
+#ifndef __MINGW32__
+    ev_signal_stop(EV_DEFAULT, &sigchld_watcher);
+    ev_signal_stop(EV_DEFAULT, &sigusr1_watcher);
+#else
+#ifndef LIB_ONLY
+    ev_io_stop(EV_DEFAULT, &plugin_watcher.io);
+#endif
+#endif
+    ev_unloop(EV_A_ EVUNLOOP_ALL);
+}
+
 int
 _start_ss_local_server(profile_t profile, ss_local_callback callback, void *udata)
 {
@@ -2047,10 +2075,9 @@ _start_ss_local_server(profile_t profile, ss_local_callback callback, void *udat
     }
 
     // Setup proxy context
-    struct ev_loop *loop = EV_DEFAULT;
+    listen_ctx.loop = EV_DEFAULT;
 
     struct sockaddr *remote_addr_tmp[MAX_REMOTE_NUM];
-    listen_ctx_t listen_ctx;
     listen_ctx.remote_num     = 1;
     listen_ctx.remote_addr    = remote_addr_tmp;
     listen_ctx.remote_addr[0] = (struct sockaddr *)(&storage);
@@ -2080,7 +2107,7 @@ _start_ss_local_server(profile_t profile, ss_local_callback callback, void *udat
         listen_ctx.fd = listenfd;
 
         ev_io_init(&listen_ctx.io, accept_cb, listenfd, EV_READ);
-        ev_io_start(loop, &listen_ctx.io);
+        ev_io_start(listen_ctx.loop, &listen_ctx.io);
     }
 
     // Setup UDP
@@ -2094,12 +2121,15 @@ _start_ss_local_server(profile_t profile, ss_local_callback callback, void *udat
     // Init connections
     cork_dllist_init(&connections);
 
+    ev_async_init(&listen_ctx.stop_watcher, stop_async_cb);
+    ev_async_start(listen_ctx.loop, &listen_ctx.stop_watcher);
+
     if (callback) {
         callback(listen_ctx.fd, udp_fd, udata);
     }
 
     // Enter the loop
-    ev_run(loop, 0);
+    ev_run(listen_ctx.loop, 0);
 
     if (verbose) {
         LOGI("closed gracefully");
@@ -2107,8 +2137,8 @@ _start_ss_local_server(profile_t profile, ss_local_callback callback, void *udat
 
     // Clean up
     if (mode != UDP_ONLY) {
-        ev_io_stop(loop, &listen_ctx.io);
-        free_connections(loop);
+        ev_io_stop(listen_ctx.loop, &listen_ctx.io);
+        free_connections(listen_ctx.loop);
         close(listen_ctx.fd);
     }
 
@@ -2120,6 +2150,14 @@ _start_ss_local_server(profile_t profile, ss_local_callback callback, void *udat
     winsock_cleanup();
 #endif
 
+    ppbloom_free();
+    ss_free(crypto->cipher);
+    ss_free(crypto);
+
+    ev_loop_destroy(listen_ctx.loop);
+
+    listen_ctx.loop = NULL;
+
     return ret_val;
 }
 
@@ -2130,9 +2168,31 @@ start_ss_local_server(profile_t profile)
 }
 
 int
+stop_ss_local_server(void)
+{
+	if (listen_ctx.loop == NULL)
+	{
+		return ret_val;
+	}
+    ev_async_send(listen_ctx.loop, &listen_ctx.stop_watcher);
+    return ret_val;
+}
+
+int
 start_ss_local_server_with_callback(profile_t profile, ss_local_callback callback, void *udata)
 {
     return _start_ss_local_server(profile, callback, udata);
 }
+
+#ifdef __ANDROID__
+
+void
+set_ss_protect_socket_fn(protect_socket_fn callback)
+{
+    protect_socket_callback = callback;
+    vpn = 0;
+}
+
+#endif
 
 #endif
